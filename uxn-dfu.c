@@ -41,9 +41,14 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <pico/stdlib.h>
 
 #include "bsp/board.h"
 #include "tusb.h"
+
+#include "uxn.h"
+#include "devices/system.h"
+#include "devices/datetime.h"
 
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF PROTYPES
@@ -67,19 +72,118 @@ enum  {
 
 static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 
+Uxn u;
+uint8_t *uxn_ram;
+int running = 0;
+
+static int
+error(char *msg, const char *err)
+{
+	fprintf(stderr, "Error %s: %s\n", msg, err);
+	return 0;
+}
+
+void
+system_deo_special(Device *d, Uint8 port)
+{
+	(void)d;
+	(void)port;
+}
+
+static void
+console_deo(Device *d, Uint8 port)
+{
+	FILE *fd = port == 0x8 ? stdout : port == 0x9 ? stderr
+												  : 0;
+	if(fd) {
+		fputc(d->dat[port], fd);
+		fflush(fd);
+	}
+}
+
+static Uint8
+nil_dei(Device *d, Uint8 port)
+{
+	return d->dat[port];
+}
+
+static void
+nil_deo(Device *d, Uint8 port)
+{
+	(void)d;
+	(void)port;
+}
+
+static int
+console_input(Uxn *u, char c)
+{
+	Device *d = &u->dev[1];
+	d->dat[0x2] = c;
+	return uxn_eval(u, GETVECTOR(d));
+}
+
+static void
+run(Uxn *u)
+{
+	Device *d = &u->dev[0];
+	while(!d->dat[0xf]) {
+		int c = fgetc(stdin);
+		if(c != EOF)
+			console_input(u, (Uint8)c);
+	}
+}
+
+int
+uxn_interrupt(void)
+{
+	return 1;
+}
+
+static int
+start(Uxn *u)
+{
+        if(!uxn_boot(u, uxn_ram))
+		return error("Boot", "Failed");
+	/* system   */ uxn_port(u, 0x0, system_dei, system_deo);
+	/* console  */ uxn_port(u, 0x1, nil_dei, console_deo);
+	/* empty    */ uxn_port(u, 0x2, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0x3, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0x4, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0x5, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0x6, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0x7, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0x8, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0x9, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0xa, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0xb, nil_dei, nil_deo);
+	/* datetime */ uxn_port(u, 0xc, datetime_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0xd, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0xe, nil_dei, nil_deo);
+	/* empty    */ uxn_port(u, 0xf, nil_dei, nil_deo);
+	return 1;
+}
+
 void led_blinking_task(void);
 
 /*------------- MAIN -------------*/
 int main(void)
 {
+  int c;
   board_init();
-
   tusb_init();
+  uxn_ram = (Uint8 *)calloc(0x10000, sizeof(Uint8));
+  if(!uxn_ram)
+    return error("Ram", "Failed to allocate");
+  printf("Waiting for rom upload...\n");
+  
 
   while (1)
   {
     tud_task(); // tinyusb device task
     led_blinking_task();
+    c = getchar_timeout_us(0);
+    if(running && c != PICO_ERROR_TIMEOUT)
+      console_input(&u, c);
   }
 
   return 0;
@@ -148,14 +252,16 @@ uint32_t tud_dfu_get_timeout_cb(uint8_t alt, uint8_t state)
 void tud_dfu_download_cb(uint8_t alt, uint16_t block_num, uint8_t const* data, uint16_t length)
 {
   (void) alt;
-  (void) block_num;
 
+  running = 0; // We stop uxn
+  
   //printf("\r\nReceived Alt %u BlockNum %u of length %u\r\n", alt, wBlockNum, length);
+  static uint8_t *ptr;
+  if(block_num == 0)
+    ptr = u.ram + PAGE_PROGRAM;
 
   for(uint16_t i=0; i<length; i++)
-  {
-    printf("%c", data[i]);
-  }
+    *ptr++ = data[i];
 
   // flashing op for download complete without error
   tud_dfu_finish_flashing(DFU_STATUS_OK);
@@ -167,7 +273,17 @@ void tud_dfu_download_cb(uint8_t alt, uint16_t block_num, uint8_t const* data, u
 void tud_dfu_manifest_cb(uint8_t alt)
 {
   (void) alt;
-  printf("Download completed, enter manifestation\r\n");
+  printf("Rom received\r\n");
+  if(!start(&u)) {
+    error("Start", "Failed");
+    return;
+  }
+  if(!uxn_eval(&u, PAGE_PROGRAM)) {
+    error("Init", "Failed");
+    return;
+  }
+
+  running = 1;
 
   // flashing op for manifest is complete without error
   // Application can perform checksum, should it fail, use appropriate status such as errVERIFY.

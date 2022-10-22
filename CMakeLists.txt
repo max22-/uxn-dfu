@@ -22,6 +22,9 @@ pico_sdk_init()
 add_executable(uxn-dfu 
     uxn-dfu.c
     usb_descriptors.c
+    uxn.c
+    devices/system.c
+    devices/datetime.c
 )
 
 target_include_directories(uxn-dfu PUBLIC
