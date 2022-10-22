@@ -41,3 +41,4 @@ make
 
 # Warning
 The uploaded rom is stored in the ram, not in flash memory.
+It would be also possible to dump the rom from the microcontroller, but i've not implemented it.
